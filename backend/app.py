@@ -1,732 +1,960 @@
 import os
 import re
-
-from dotenv import load_dotenv
-
-# ============================================================
-# BASE DIRECTORY
-# ============================================================
-
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
-load_dotenv(
-    os.path.join(BASE_DIR, ".env")
-)
-
-# ============================================================
-# IMPORTS
-# ============================================================
+from datetime import datetime
 
 import numpy as np
 import faiss
-
-from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from flask import Flask, jsonify, request
 from flask_cors import CORS
-
 from groq import Groq
 from pymongo import MongoClient
-
-from werkzeug.security import (
-    generate_password_hash,
-    check_password_hash
-)
-
+from bson import ObjectId
+from werkzeug.security import generate_password_hash, check_password_hash
 from sentence_transformers import SentenceTransformer
 
+
 # ============================================================
-# ENVIRONMENT VARIABLES
+# ENVIRONMENT
 # ============================================================
 
-GROQ_API_KEY = os.getenv(
-    "GROQ_API_KEY"
-)
+load_dotenv()
 
-MONGO_URI = os.getenv(
-    "MONGO_URI"
-)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MONGO_URI = os.getenv("MONGO_URI")
 
 if not GROQ_API_KEY:
-    raise ValueError(
-        "GROQ_API_KEY is not set"
-    )
+    print("WARNING: GROQ_API_KEY is not set.")
 
 if not MONGO_URI:
-    raise ValueError(
-        "MONGO_URI is not set"
-    )
+    print("WARNING: MONGO_URI is not set.")
+
 
 # ============================================================
-# FILE PATHS
+# FLASK APP + CORS
 # ============================================================
 
-INDEX_PATH = os.path.join(
-    BASE_DIR,
-    "constitution.index"
+app = Flask(__name__)
+
+# Allow the React/Vercel frontend and local React development server.
+# This also handles browser OPTIONS preflight requests.
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type"],
+    supports_credentials=False,
 )
 
-DOCUMENTS_PATH = os.path.join(
-    BASE_DIR,
-    "documents.npy"
-)
 
-# ============================================================
-# GROQ
-# ============================================================
+# Explicit OPTIONS response for the conversation collection route.
+# This guarantees that the browser's POST preflight receives HTTP 200.
+@app.route("/conversations", methods=["OPTIONS"])
+def conversations_options():
+    return ("", 200)
 
-groq_client = Groq(
-    api_key=GROQ_API_KEY
-)
+
+# Explicit OPTIONS response for conversation GET/DELETE routes.
+@app.route("/conversations/<identifier>", methods=["OPTIONS"])
+def conversation_identifier_options(identifier):
+    return ("", 200)
+
 
 # ============================================================
 # MONGODB
 # ============================================================
 
-mongo_client = MongoClient(
-    MONGO_URI
-)
+mongo_client = None
+db = None
+users_collection = None
+conversations_collection = None
 
-db = mongo_client[
-    "legal_rag"
-]
+if MONGO_URI:
+    try:
+        mongo_client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=10000
+        )
 
-users_collection = db[
-    "users"
-]
+        # Force a connection check during startup.
+        mongo_client.admin.command("ping")
+
+        db = mongo_client["legal_rag"]
+
+        users_collection = db["users"]
+        conversations_collection = db["conversations"]
+
+        print("MongoDB connected successfully.")
+
+    except Exception as e:
+        print("MongoDB connection failed:", e)
+
 
 # ============================================================
-# LOAD FAISS INDEX
+# GROQ
 # ============================================================
 
-if not os.path.exists(
-    INDEX_PATH
-):
-    raise FileNotFoundError(
-        f"FAISS index not found: {INDEX_PATH}"
+groq_client = None
+
+if GROQ_API_KEY:
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        print("Groq client initialized successfully.")
+    except Exception as e:
+        print("Groq initialization failed:", e)
+
+
+# Keep the working model used by the deployed project.
+GROQ_MODEL = "qwen/qwen3.8-27b"
+
+
+# ============================================================
+# FAISS + EMBEDDING MODEL
+# ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+INDEX_PATH = os.path.join(BASE_DIR, "constitution.index")
+DOCUMENTS_PATH = os.path.join(BASE_DIR, "documents.npy")
+
+
+faiss_index = None
+documents = None
+embedding_model = None
+
+
+# ------------------------------------------------------------
+# Load FAISS index
+# ------------------------------------------------------------
+
+try:
+    if os.path.exists(INDEX_PATH):
+        faiss_index = faiss.read_index(INDEX_PATH)
+
+        print(
+            f"FAISS index loaded successfully: "
+            f"{faiss_index.ntotal} vectors"
+        )
+    else:
+        print(
+            f"WARNING: FAISS index not found at {INDEX_PATH}"
+        )
+
+except Exception as e:
+    print("FAISS loading failed:", e)
+
+
+# ------------------------------------------------------------
+# Load documents
+# ------------------------------------------------------------
+
+try:
+    if os.path.exists(DOCUMENTS_PATH):
+        documents = np.load(
+            DOCUMENTS_PATH,
+            allow_pickle=True
+        )
+
+        print(
+            f"Documents loaded successfully: "
+            f"{len(documents)} documents"
+        )
+    else:
+        print(
+            f"WARNING: documents.npy not found at "
+            f"{DOCUMENTS_PATH}"
+        )
+
+except Exception as e:
+    print("Document loading failed:", e)
+
+
+# ------------------------------------------------------------
+# Load MiniLM ONNX embedding model
+# ------------------------------------------------------------
+
+try:
+    embedding_model = SentenceTransformer(
+        "sentence-transformers/all-MiniLM-L6-v2",
+        backend="onnx"
     )
 
-if not os.path.exists(
-    DOCUMENTS_PATH
-):
-    raise FileNotFoundError(
-        f"Documents file not found: {DOCUMENTS_PATH}"
-    )
+    print("SentenceTransformer ONNX model loaded successfully.")
 
-index = faiss.read_index(
-    INDEX_PATH
-)
+except Exception as e:
+    print("Embedding model loading failed:", e)
 
-documents = np.load(
-    DOCUMENTS_PATH,
-    allow_pickle=True
-)
-
-print(
-    "FAISS index loaded successfully"
-)
-
-print(
-    "FAISS vectors:",
-    index.ntotal
-)
-
-print(
-    "Documents:",
-    len(documents)
-)
 
 # ============================================================
-# LOAD EMBEDDING MODEL
+# HELPERS
 # ============================================================
 
-embedding_model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2",
-    backend="onnx"
-)
+def normalize_email(email):
+    return (email or "").strip().lower()
 
-print(
-    "Embedding model loaded successfully"
-)
 
-# ============================================================
-# RAG QUERY PROCESSING
-# ============================================================
+def serialize_document(document):
+    """
+    Convert numpy/object documents into normal JSON-safe text.
+    """
+    if isinstance(document, dict):
+        return document
 
-def process_rag_query(
-    user_query,
-    mode="detailed"
-):
+    if hasattr(document, "page_content"):
+        return {
+            "text": str(document.page_content)
+        }
 
-    print(
-        "\n========== RETRIEVAL DEBUG =========="
-    )
+    return {
+        "text": str(document)
+    }
 
-    print(
-        "QUERY:",
-        user_query
-    )
 
-    relevant_chunks = []
+def get_document_text(document):
+    """
+    Extract the actual text from documents.npy entries.
+    """
+    if isinstance(document, dict):
+        for key in (
+            "text",
+            "content",
+            "page_content",
+            "article_desc",
+            "document"
+        ):
+            if key in document:
+                return str(document[key])
 
-    # ========================================================
-    # 1. DETECT ARTICLE NUMBER
-    # ========================================================
+        return str(document)
 
-    article_match = re.search(
-        r"\barticle\s+(\d+[A-Za-z]?)\b",
-        user_query,
+    if hasattr(document, "page_content"):
+        return str(document.page_content)
+
+    return str(document)
+
+
+def extract_article_number(text):
+    """
+    Detect article references such as:
+    Article 14
+    article 21
+    Art. 19
+    """
+    if not text:
+        return None
+
+    match = re.search(
+        r"\b(?:article|art\.?)\s+(\d+[A-Za-z]?)\b",
+        text,
         re.IGNORECASE
     )
 
-    if article_match:
+    if match:
+        return f"Article {match.group(1)}"
 
-        requested_article = (
-            article_match.group(1)
+    return None
+
+
+def retrieve_context(query, top_k=5, threshold=0.20):
+    """
+    Retrieve relevant constitutional chunks using FAISS.
+    """
+    if faiss_index is None:
+        return []
+
+    if embedding_model is None:
+        return []
+
+    if documents is None:
+        return []
+
+    try:
+        query_embedding = embedding_model.encode(
+            [query],
+            normalize_embeddings=True
         )
 
-        print(
-            "Detected Article:",
-            requested_article
-        )
-
-        # Example:
-        # Article 21
-        # Article 21A
-        target = (
-            f"Article {requested_article}"
-        ).lower()
-
-        # ====================================================
-        # DIRECT ARTICLE RETRIEVAL
-        # ====================================================
-
-        for document in documents:
-
-            article_id = str(
-                document[
-                    "article_id"
-                ]
-            )
-
-            # Exact beginning match.
-            #
-            # This prevents:
-            # Article 21
-            # from accidentally matching:
-            # Article 210
-            #
-            if article_id.lower().startswith(
-                target
-            ):
-
-                # Additional boundary check
-                remainder = article_id[
-                    len(target):
-                ]
-
-                if (
-                    remainder == ""
-                    or not remainder[0].isdigit()
-                ):
-
-                    print(
-                        "Direct match found:",
-                        article_id
-                    )
-
-                    print(
-                        "Text:",
-                        document[
-                            "page_content"
-                        ]
-                    )
-
-                    relevant_chunks.append(
-                        document[
-                            "page_content"
-                        ]
-                    )
-
-                    break
-
-    # ========================================================
-    # 2. FALLBACK TO FAISS
-    # ========================================================
-
-    if not relevant_chunks:
-
-        print(
-            "No direct Article match."
-        )
-
-        print(
-            "Using FAISS semantic search..."
-        )
-
-        query_embedding = (
-            embedding_model.encode(
-                user_query,
-                convert_to_numpy=True
-            )
-        )
-
-        query_embedding_np = np.array(
-            [query_embedding],
+        query_embedding = np.asarray(
+            query_embedding,
             dtype="float32"
         )
 
-        # Normalize query vector
-        faiss.normalize_L2(
-            query_embedding_np
+        distances, indices = faiss_index.search(
+            query_embedding,
+            top_k
         )
 
-        # Search top 5
-        D, I = index.search(
-            query_embedding_np,
-            k=5
-        )
+        results = []
 
-        for score, idx in zip(
-            D[0],
-            I[0]
+        for score, index in zip(
+            distances[0],
+            indices[0]
         ):
-
-            if idx < 0:
+            if index < 0:
                 continue
 
-            article_id = documents[
-                idx
-            ][
-                "article_id"
-            ]
+            if index >= len(documents):
+                continue
 
-            text = documents[
-                idx
-            ][
-                "page_content"
-            ]
+            # Preserve the project's similarity threshold.
+            if float(score) < threshold:
+                continue
 
-            print(
-                "--------------------------------"
-            )
+            document = documents[index]
 
-            print(
-                "Score:",
-                float(score)
-            )
+            results.append({
+                "score": float(score),
+                "index": int(index),
+                "document": serialize_document(document),
+                "text": get_document_text(document)
+            })
 
-            print(
-                "Index:",
-                int(idx)
-            )
+        return results
 
-            print(
-                "Article:",
-                article_id
-            )
+    except Exception as e:
+        print("Retrieval error:", e)
+        return []
 
-            print(
-                "Text:",
-                text
-            )
 
-            # Current threshold
-            if score >= 0.20:
+def build_context(retrieved_documents):
+    """
+    Build the context sent to the LLM.
+    """
+    if not retrieved_documents:
+        return ""
 
-                relevant_chunks.append(
-                    text
-                )
+    context_parts = []
 
-    print(
-        "=====================================\n"
-    )
+    for i, item in enumerate(
+        retrieved_documents,
+        start=1
+    ):
+        context_parts.append(
+            f"[Context {i}]\n"
+            f"{item['text']}"
+        )
 
-    # ========================================================
-    # 3. NO RELEVANT CONTEXT
-    # ========================================================
+    return "\n\n".join(context_parts)
 
-    if not relevant_chunks:
 
-        return {
-            "answer":
-                "No relevant Constitution content was retrieved."
-        }
-
-    # ========================================================
-    # 4. BUILD CONTEXT
-    # ========================================================
-
-    context = "\n\n".join(
-        relevant_chunks
-    )
-
-    print(
-        "CONTEXT SENT TO QWEN:"
-    )
-
-    print(
-        context
-    )
-
-    # ========================================================
-    # 5. SYSTEM PROMPT
-    # ========================================================
+def get_mode_instruction(mode):
+    mode = (mode or "detailed").lower()
 
     if mode == "simple":
-        system_prompt = (
-            "You are a friendly constitutional guide. "
-            "Answer the user's question using ONLY the provided context from the Constitution of India. "
-            "Explain the answer in clear, simple everyday English suitable for a beginner or non-lawyer without dense legalese. "
-            "Mention the relevant Article clearly, give a straightforward summary, and provide 2-3 brief bullet points under 'Key Points'.\n\n"
-            f"CONTEXT:\n{context}"
-        )
-    elif mode == "legal":
-        system_prompt = (
-            "You are a constitutional jurist and senior advocate. "
-            "Answer the user's question ONLY using the provided context from the Constitution of India. "
-            "Provide a rigorous, formal legal analysis adhering strictly to statutory constitutional phrasing, judicial doctrine, and jurisprudence. "
-            "State the exact Article, constitutional provisions, legal mandates, and exceptions.\n\n"
-            f"CONTEXT:\n{context}"
-        )
-    else:  # detailed mode (default)
-        system_prompt = (
-            "You are an expert constitutional legal assistant. "
-            "Answer the user's question ONLY using the provided context from the Constitution of India. "
-            "Provide a comprehensive, structured response stating the relevant Article, its constitutional scope, and bulleted takeaways under 'Key Points'.\n\n"
-            f"CONTEXT:\n{context}"
+        return (
+            "Explain the answer in simple, clear language "
+            "for a person without legal training. Avoid "
+            "unnecessary legal jargon."
         )
 
-    # ========================================================
-    # 6. QWEN THROUGH GROQ
-    # ========================================================
+    if mode == "legal":
+        return (
+            "Provide a rigorous constitutional explanation "
+            "using precise legal terminology where supported "
+            "by the retrieved Constitution context."
+        )
 
-    response = (
-        groq_client
-        .chat
-        .completions
-        .create(
+    return (
+        "Provide a detailed constitutional explanation, "
+        "including the relevant provision, scope, and key "
+        "points where supported by the retrieved context."
+    )
 
-            model="qwen/qwen3.8-27b",
 
+def generate_rag_answer(query, mode="detailed"):
+    """
+    Main RAG pipeline:
+    Query -> MiniLM embedding -> FAISS -> context -> Groq/Qwen.
+    """
+    retrieved = retrieve_context(
+        query,
+        top_k=5,
+        threshold=0.20
+    )
+
+    if not retrieved:
+        return (
+            "I could not find sufficiently relevant content "
+            "in the indexed Constitution data to answer this "
+            "question."
+        )
+
+    context = build_context(retrieved)
+
+    if groq_client is None:
+        return (
+            "The constitutional retrieval system found "
+            "relevant content, but the language-generation "
+            "service is currently unavailable."
+        )
+
+    mode_instruction = get_mode_instruction(mode)
+
+    prompt = f"""
+You are a constitutional question-answering assistant.
+
+Answer ONLY from the Constitution context provided below.
+
+Do not invent facts, articles, cases, provisions, or legal
+claims that are not supported by the retrieved context.
+
+If the context does not contain enough information to answer
+the question, clearly say that the indexed Constitution
+context does not contain enough information.
+
+{mode_instruction}
+
+User question:
+{query}
+
+Constitution context:
+{context}
+
+Answer:
+""".strip()
+
+    try:
+        completion = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
             messages=[
                 {
                     "role": "system",
-                    "content": system_prompt
+                    "content": (
+                        "You are a careful constitutional "
+                        "RAG assistant. Ground every answer "
+                        "in the supplied context."
+                    )
                 },
                 {
                     "role": "user",
-                    "content": user_query
+                    "content": prompt
                 }
             ],
-
-            temperature=0.4,
-
-            max_completion_tokens=200,
-
-            reasoning_effort="none"
-        )
-    )
-
-    # ========================================================
-    # 7. GET GENERATED ANSWER
-    # ========================================================
-
-    generated_text = (
-        response
-        .choices[0]
-        .message
-        .content
-    )
-
-    return {
-        "answer":
-            generated_text.strip()
-    }
-
-
-# ============================================================
-# FLASK APP
-# ============================================================
-
-app = Flask(
-    __name__
-)
-
-# ============================================================
-# CORS
-# ============================================================
-
-CORS(
-    app,
-    resources={
-        r"/*": {
-            "origins": "*"
-        }
-    }
-)
-
-# ============================================================
-# GENERATE ROUTE
-# ============================================================
-
-@app.route(
-    "/generate",
-    methods=["POST"]
-)
-def generate():
-
-    try:
-
-        data = request.get_json()
-
-        if not data:
-
-            return jsonify({
-                "error":
-                    "Request body is required"
-            }), 400
-
-        query = data.get(
-            "query",
-            ""
+            temperature=0.2,
+            max_tokens=900
         )
 
-        mode = data.get(
-            "mode",
-            "detailed"
+        answer = (
+            completion.choices[0].message.content
+            if completion.choices
+            else ""
         )
 
-        if not query.strip():
+        if not answer:
+            return (
+                "No answer was returned by the language "
+                "generation service."
+            )
 
-            return jsonify({
-                "error":
-                    "Query is required"
-            }), 400
-
-        result = process_rag_query(
-            query,
-            mode=mode
-        )
-
-        return jsonify(
-            result
-        ), 200
+        return answer.strip()
 
     except Exception as e:
+        print("Groq generation error:", e)
 
-        import traceback
-
-        traceback.print_exc()
-
-        return jsonify({
-            "error":
-                str(e)
-        }), 500
+        return (
+            "The constitutional retrieval succeeded, but "
+            "answer generation is temporarily unavailable."
+        )
 
 
 # ============================================================
-# SIGNUP ROUTE
+# HEALTH CHECK
 # ============================================================
 
-@app.route(
-    "/signup",
-    methods=["POST"]
-)
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Legal RAG Backend",
+        "faiss_loaded": faiss_index is not None,
+        "documents_loaded": documents is not None,
+        "embedding_model_loaded": embedding_model is not None,
+        "mongodb_connected": conversations_collection is not None,
+        "groq_configured": groq_client is not None
+    }), 200
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "healthy",
+        "faiss_vectors": (
+            int(faiss_index.ntotal)
+            if faiss_index is not None
+            else 0
+        ),
+        "documents": (
+            int(len(documents))
+            if documents is not None
+            else 0
+        ),
+        "mongodb": conversations_collection is not None,
+        "groq": groq_client is not None
+    }), 200
+
+
+# ============================================================
+# SIGNUP
+# ============================================================
+
+@app.route("/signup", methods=["POST", "OPTIONS"])
 def signup():
 
+    if request.method == "OPTIONS":
+        return ("", 200)
+
     try:
-
-        data = request.get_json()
-
-        if not data:
-
+        if users_collection is None:
             return jsonify({
-                "error":
-                    "Request body is required"
+                "error": "Database is not available"
+            }), 503
+
+        data = request.get_json(silent=True) or {}
+
+        name = (data.get("name") or "").strip()
+        email = normalize_email(data.get("email"))
+        password = data.get("password") or ""
+
+        if not name:
+            return jsonify({
+                "error": "Name is required"
             }), 400
 
-        name = data.get(
-            "name",
-            ""
-        )
-
-        email = data.get(
-            "email",
-            ""
-        )
-
-        password = data.get(
-            "password",
-            ""
-        )
-
-        if not email or not password:
-
+        if not email:
             return jsonify({
-                "error":
-                    "Email and password are required"
+                "error": "Email is required"
             }), 400
 
-        # Check existing user
-        existing_user = (
-            users_collection.find_one(
-                {
-                    "email": email
-                }
-            )
-        )
+        if not password:
+            return jsonify({
+                "error": "Password is required"
+            }), 400
+
+        existing_user = users_collection.find_one({
+            "email": email
+        })
 
         if existing_user:
-
             return jsonify({
-                "error":
-                    "User already exists"
+                "error": "An account with this email already exists"
             }), 409
 
-        # Hash password
-        hashed_password = (
-            generate_password_hash(
-                password
-            )
+        hashed_password = generate_password_hash(
+            password
         )
 
-        # Save user
-        users_collection.insert_one(
-            {
-                "name": name,
-                "email": email,
-                "password": hashed_password
-            }
-        )
+        users_collection.insert_one({
+            "name": name,
+            "email": email,
+            "password": hashed_password,
+            "createdAt": datetime.utcnow()
+        })
 
         return jsonify({
-            "message":
-                "Signup successful"
+            "message": "Account created successfully",
+            "name": name,
+            "email": email
         }), 201
 
     except Exception as e:
-
-        import traceback
-
-        traceback.print_exc()
+        print("Signup error:", e)
 
         return jsonify({
-            "error":
-                str(e)
+            "error": "Signup failed"
         }), 500
 
 
 # ============================================================
-# LOGIN ROUTE
+# LOGIN
 # ============================================================
 
-@app.route(
-    "/login",
-    methods=["POST"]
-)
+@app.route("/login", methods=["POST", "OPTIONS"])
 def login():
 
+    if request.method == "OPTIONS":
+        return ("", 200)
+
     try:
-
-        data = request.get_json()
-
-        if not data:
-
+        if users_collection is None:
             return jsonify({
-                "error":
-                    "Request body is required"
-            }), 400
+                "error": "Database is not available"
+            }), 503
 
-        email = data.get(
-            "email",
-            ""
-        )
+        data = request.get_json(silent=True) or {}
 
-        password = data.get(
-            "password",
-            ""
-        )
+        email = normalize_email(data.get("email"))
+        password = data.get("password") or ""
 
         if not email or not password:
-
             return jsonify({
-                "error":
-                    "Email and password are required"
+                "error": "Email and password are required"
             }), 400
 
-        # Find user
-        user = (
-            users_collection.find_one(
-                {
-                    "email": email
-                }
-            )
-        )
+        user = users_collection.find_one({
+            "email": email
+        })
 
         if not user:
-
             return jsonify({
-                "error":
-                    "Invalid email or password"
+                "error": "Invalid email or password"
             }), 401
 
-        # Verify password
+        stored_password = user.get("password", "")
+
         if not check_password_hash(
-            user["password"],
+            stored_password,
             password
         ):
-
             return jsonify({
-                "error":
-                    "Invalid email or password"
+                "error": "Invalid email or password"
             }), 401
 
         return jsonify({
-
-            "message":
-                "Login successful",
-
-            "user": {
-
-                "name":
-                    user.get(
-                        "name",
-                        ""
-                    ),
-
-                "email":
-                    user["email"]
-            }
-
+            "message": "Login successful",
+            "name": user.get("name", ""),
+            "email": user.get("email", "")
         }), 200
 
     except Exception as e:
-
-        import traceback
-
-        traceback.print_exc()
+        print("Login error:", e)
 
         return jsonify({
-            "error":
-                str(e)
+            "error": "Login failed"
         }), 500
 
 
 # ============================================================
-# START SERVER
+# GENERATE / RAG
+# ============================================================
+
+@app.route("/generate", methods=["POST", "OPTIONS"])
+def generate():
+
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    try:
+        data = request.get_json(silent=True) or {}
+
+        query = (data.get("query") or "").strip()
+        mode = data.get("mode", "detailed")
+
+        if not query:
+            return jsonify({
+                "error": "Query is required"
+            }), 400
+
+        answer = generate_rag_answer(
+            query,
+            mode
+        )
+
+        return jsonify({
+            "answer": answer,
+            "mode": mode
+        }), 200
+
+    except Exception as e:
+        print("Generate error:", e)
+
+        return jsonify({
+            "error": "Failed to generate answer"
+        }), 500
+
+
+# ============================================================
+# SAVE / UPDATE CONVERSATION
+# ============================================================
+
+@app.route("/conversations", methods=["POST", "OPTIONS"])
+def save_conversation():
+
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    try:
+        if conversations_collection is None:
+            return jsonify({
+                "error": "Database is not available"
+            }), 503
+
+        data = request.get_json(silent=True) or {}
+
+        email = normalize_email(data.get("email"))
+        messages = data.get("messages", [])
+        title = (
+            data.get("title") or
+            "New Conversation"
+        )
+        conversation_id = data.get("conversationId")
+
+        if not email:
+            return jsonify({
+                "error": "Email is required"
+            }), 400
+
+        if not isinstance(messages, list) or not messages:
+            return jsonify({
+                "error": "Messages are required"
+            }), 400
+
+        # ----------------------------------------------------
+        # UPDATE EXISTING CONVERSATION
+        # ----------------------------------------------------
+
+        if conversation_id:
+
+            try:
+                object_id = ObjectId(
+                    conversation_id
+                )
+            except Exception:
+                return jsonify({
+                    "error": "Invalid conversation ID"
+                }), 400
+
+            result = conversations_collection.update_one(
+                {
+                    "_id": object_id,
+                    "email": email
+                },
+                {
+                    "$set": {
+                        "title": title,
+                        "messages": messages,
+                        "updatedAt": datetime.utcnow()
+                    }
+                }
+            )
+
+            if result.matched_count == 0:
+                return jsonify({
+                    "error": "Conversation not found"
+                }), 404
+
+            return jsonify({
+                "message": "Conversation updated successfully",
+                "conversationId": conversation_id
+            }), 200
+
+        # ----------------------------------------------------
+        # CREATE NEW CONVERSATION
+        # ----------------------------------------------------
+
+        now = datetime.utcnow()
+
+        conversation = {
+            "email": email,
+            "title": title,
+            "messages": messages,
+            "createdAt": now,
+            "updatedAt": now
+        }
+
+        result = conversations_collection.insert_one(
+            conversation
+        )
+
+        return jsonify({
+            "message": "Conversation saved successfully",
+            "conversationId": str(
+                result.inserted_id
+            )
+        }), 201
+
+    except Exception as e:
+        print("Error saving conversation:", e)
+
+        return jsonify({
+            "error": "Failed to save conversation"
+        }), 500
+
+
+# ============================================================
+# GET USER CONVERSATIONS
+# DELETE USER CONVERSATION
+#
+# IMPORTANT:
+# Both operations intentionally use ONE dynamic route.
+# This avoids the Flask route conflict between:
+# /conversations/<email>
+# /conversations/<conversation_id>
+# ============================================================
+
+@app.route(
+    "/conversations/<identifier>",
+    methods=["GET", "DELETE", "OPTIONS"]
+)
+def conversation_by_identifier(identifier):
+
+    # --------------------------------------------------------
+    # OPTIONS / PREFLIGHT
+    # --------------------------------------------------------
+
+    if request.method == "OPTIONS":
+        return ("", 200)
+
+    # --------------------------------------------------------
+    # GET USER CONVERSATIONS
+    # --------------------------------------------------------
+
+    if request.method == "GET":
+
+        try:
+            if conversations_collection is None:
+                return jsonify({
+                    "error": "Database is not available"
+                }), 503
+
+            email = normalize_email(identifier)
+
+            if not email:
+                return jsonify({
+                    "error": "Email is required"
+                }), 400
+
+            conversations = list(
+                conversations_collection.find(
+                    {
+                        "email": email
+                    }
+                ).sort(
+                    "updatedAt",
+                    -1
+                )
+            )
+
+            for conversation in conversations:
+                conversation["_id"] = str(
+                    conversation["_id"]
+                )
+
+            return jsonify({
+                "conversations": conversations
+            }), 200
+
+        except Exception as e:
+            print(
+                "Error loading conversations:",
+                e
+            )
+
+            return jsonify({
+                "error": "Failed to load conversations"
+            }), 500
+
+    # --------------------------------------------------------
+    # DELETE CONVERSATION
+    # --------------------------------------------------------
+
+    if request.method == "DELETE":
+
+        try:
+            if conversations_collection is None:
+                return jsonify({
+                    "error": "Database is not available"
+                }), 503
+
+            conversation_id = identifier
+
+            try:
+                object_id = ObjectId(
+                    conversation_id
+                )
+            except Exception:
+                return jsonify({
+                    "error": "Invalid conversation ID"
+                }), 400
+
+            # The frontend sends the user's email as a query
+            # parameter when available:
+            # DELETE /conversations/<id>?email=user@example.com
+            #
+            # If email is supplied, enforce ownership.
+            email = normalize_email(
+                request.args.get("email")
+            )
+
+            if email:
+                result = conversations_collection.delete_one(
+                    {
+                        "_id": object_id,
+                        "email": email
+                    }
+                )
+            else:
+                # Backward-compatible deletion for the current
+                # frontend. The ID is random MongoDB ObjectId.
+                result = conversations_collection.delete_one(
+                    {
+                        "_id": object_id
+                    }
+                )
+
+            if result.deleted_count == 0:
+                return jsonify({
+                    "error": "Conversation not found"
+                }), 404
+
+            return jsonify({
+                "message": "Conversation deleted successfully"
+            }), 200
+
+        except Exception as e:
+            print(
+                "Error deleting conversation:",
+                e
+            )
+
+            return jsonify({
+                "error": "Failed to delete conversation"
+            }), 500
+
+    return jsonify({
+        "error": "Method not allowed"
+    }), 405
+
+
+# ============================================================
+# ERROR HANDLERS
+# ============================================================
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "error": "Endpoint not found"
+    }), 404
+
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({
+        "error": "Method not allowed"
+    }), 405
+
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    return jsonify({
+        "error": "Internal server error"
+    }), 500
+
+
+# ============================================================
+# LOCAL DEVELOPMENT
 # ============================================================
 
 if __name__ == "__main__":
+    port = int(
+        os.environ.get(
+            "PORT",
+            5000
+        )
+    )
 
     app.run(
-
         host="0.0.0.0",
-
-        port=int(
-            os.environ.get(
-                "PORT",
-                5000
-            )
-        )
+        port=port,
+        debug=False
     )
