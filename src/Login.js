@@ -127,7 +127,7 @@ function Login() {
   async function submit(e) {
     e.preventDefault();
     try {
-      const res = await axios.post("constitution-rag-production.up.railway.app/login", {
+      const res = await axios.post("https://constitution-rag-production.up.railway.app/login", {
         email,
         password,
       });

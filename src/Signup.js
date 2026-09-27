@@ -158,7 +158,7 @@ function Signup() {
 
     try {
       const res = await axios.post(
-          "constitution-rag-production.up.railway.app/signup",formData);
+          "https://constitution-rag-production.up.railway.app/signup",formData);
 
       if (res.status === 201 && res.data.message === "Signup successful") {
          history("/home", { state: { name: formData.fullName } });

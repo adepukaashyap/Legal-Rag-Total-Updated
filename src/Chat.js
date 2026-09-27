@@ -26,7 +26,7 @@ import {
   TrashIcon,
 } from "./Icons";
 
-const API_URL = "https://legal-rag-main-production.up.railway.app/generate";
+const API_URL = "https://constitution-rag-production.up.railway.app/generate";
 
 // Initial seed conversation matching the provided mockup image
 const SEED_MESSAGES = [
