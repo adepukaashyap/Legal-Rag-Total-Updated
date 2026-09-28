@@ -27,8 +27,7 @@ import {
 } from "./Icons";
 
 const API_URL = "https://constitution-rag-production.up.railway.app/generate";
-const CONVERSATIONS_API_URL =
-  "https://constitution-rag-production.up.railway.app/conversations";
+const CONVERSATIONS_API_URL = "https://constitution-rag-production.up.railway.app/conversations";
 
 // Initial seed conversation matching the provided mockup image
 const SEED_MESSAGES = [
@@ -128,37 +127,20 @@ function Chat() {
   const [loading, setLoading] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
 
-  // Conversations & History State
-  // Conversations & History State
+  // Conversations & History State (stored in MongoDB)
   const [messages, setMessages] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [activeConversationId, setActiveConversationId] = useState(null);
+  const [recentQuestions, setRecentQuestions] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
-
-  const recentQuestions = conversations.map((conversation) => ({
-    id: conversation._id,
-    title: conversation.title || "New Conversation",
-    time: conversation.updatedAt
-      ? new Date(conversation.updatedAt).toLocaleString([], {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-      : "",
-    query:
-      conversation.messages?.find(
-        (message) => message.sender === "user"
-      )?.text ||
-      conversation.title ||
-      "New Conversation",
-  }));
 
   // Bookmarked Articles & Answers
   const [bookmarkedArticles, setBookmarkedArticles] = useState(() => {
     try {
       const saved = localStorage.getItem(`constitution_bookmarks_${userEmail}`);
-      return saved ? JSON.parse(saved) : ["Article 14", "Article 21"];
+      return saved ? JSON.parse(saved) : [];
     } catch (e) {
-      return ["Article 14", "Article 21"];
+      return [];
     }
   });
 
@@ -176,14 +158,47 @@ function Chat() {
     }
   }, [messages, loading, activeTab]);
 
-  // Sync state to localStorage
-  // Load this user's conversations from MongoDB
+  useEffect(() => {
+    try {
+      localStorage.setItem(`constitution_bookmarks_${userEmail}`, JSON.stringify(bookmarkedArticles));
+    } catch (e) {}
+  }, [bookmarkedArticles, userEmail]);
+
+  // Convert MongoDB conversations into the sidebar/full-history format.
+  const mapConversationsToHistory = (items) => {
+    return items.map((conversation) => {
+      const firstUserMessage = conversation.messages?.find(
+        (message) => message.sender === "user"
+      );
+
+      return {
+        id: conversation._id,
+        title: conversation.title || "New Conversation",
+        time: conversation.updatedAt
+          ? new Date(conversation.updatedAt).toLocaleString([], {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })
+          : "",
+        query:
+          firstUserMessage?.text ||
+          conversation.title ||
+          "New Conversation",
+      };
+    });
+  };
+
+  // Load only the logged-in user's conversations from MongoDB.
   useEffect(() => {
     let cancelled = false;
 
     const loadConversations = async () => {
       if (!userEmail || userEmail === "kaashyap@example.com") {
         setHistoryLoading(false);
+        setConversations([]);
+        setRecentQuestions([]);
+        setMessages([]);
+        setActiveConversationId(null);
         return;
       }
 
@@ -197,32 +212,22 @@ function Chat() {
 
         if (cancelled) return;
 
-        const loadedConversations =
-          response.data?.conversations || [];
-
+        const loadedConversations = response.data?.conversations || [];
         setConversations(loadedConversations);
+        setRecentQuestions(mapConversationsToHistory(loadedConversations));
 
         if (loadedConversations.length > 0) {
           const latestConversation = loadedConversations[0];
-
-          setActiveConversationId(
-            latestConversation._id
-          );
-
-          setMessages(
-            latestConversation.messages || []
-          );
+          setActiveConversationId(latestConversation._id);
+          setMessages(latestConversation.messages || []);
         } else {
           setActiveConversationId(null);
           setMessages([]);
         }
       } catch (error) {
-        console.warn(
-          "Could not load conversation history:",
-          error
-        );
-
+        console.warn("Could not load conversation history:", error);
         setConversations([]);
+        setRecentQuestions([]);
         setActiveConversationId(null);
         setMessages([]);
       } finally {
@@ -239,15 +244,59 @@ function Chat() {
     };
   }, [userEmail]);
 
-  // Bookmarks remain in localStorage
-  useEffect(() => {
+  // Save a new conversation or update the currently open conversation.
+  const saveConversationToMongo = async (
+    conversationMessages,
+    conversationId = null
+  ) => {
+    if (!userEmail || userEmail === "kaashyap@example.com") {
+      return conversationId;
+    }
+
+    const firstUserMessage = conversationMessages.find(
+      (message) => message.sender === "user"
+    );
+
+    const title = firstUserMessage?.text
+      ? firstUserMessage.text.length > 60
+        ? `${firstUserMessage.text.substring(0, 60)}...`
+        : firstUserMessage.text
+      : "New Conversation";
+
     try {
-      localStorage.setItem(
-        `constitution_bookmarks_${userEmail}`,
-        JSON.stringify(bookmarkedArticles)
+      const response = await axios.post(
+        CONVERSATIONS_API_URL,
+        {
+          email: userEmail,
+          title,
+          messages: conversationMessages,
+          ...(conversationId ? { conversationId } : {}),
+        },
+        { timeout: 15000 }
       );
-    } catch (e) { }
-  }, [bookmarkedArticles, userEmail]);
+
+      const savedConversationId =
+        response.data?.conversationId || conversationId;
+
+      setActiveConversationId(savedConversationId);
+
+      const historyResponse = await axios.get(
+        `${CONVERSATIONS_API_URL}/${encodeURIComponent(userEmail)}`,
+        { timeout: 15000 }
+      );
+
+      const loadedConversations =
+        historyResponse.data?.conversations || [];
+
+      setConversations(loadedConversations);
+      setRecentQuestions(mapConversationsToHistory(loadedConversations));
+
+      return savedConversationId;
+    } catch (error) {
+      console.warn("Could not save conversation to MongoDB:", error);
+      return conversationId;
+    }
+  };
 
   // Toggle Theme
   const toggleDarkMode = () => {
@@ -296,70 +345,13 @@ function Chat() {
   };
 
   // Handle Query Submission
-  // Save conversation to MongoDB
-  const saveConversationToMongo = async (
-    conversationMessages,
-    conversationId = null
-  ) => {
-    const firstUserMessage = conversationMessages.find(
-      (message) => message.sender === "user"
-    );
-
-    const title = firstUserMessage?.text
-      ? firstUserMessage.text.length > 60
-        ? `${firstUserMessage.text.substring(0, 60)}...`
-        : firstUserMessage.text
-      : "New Conversation";
-
-    try {
-      const response = await axios.post(
-        CONVERSATIONS_API_URL,
-        {
-          email: userEmail,
-          title,
-          messages: conversationMessages,
-          ...(conversationId ? { conversationId } : {}),
-        },
-        { timeout: 15000 }
-      );
-
-      const savedConversationId =
-        response.data?.conversationId || conversationId;
-
-      setActiveConversationId(savedConversationId);
-
-      // Refresh history after saving
-      const historyResponse = await axios.get(
-        `${CONVERSATIONS_API_URL}/${encodeURIComponent(
-          userEmail
-        )}`,
-        { timeout: 15000 }
-      );
-
-      setConversations(
-        historyResponse.data?.conversations || []
-      );
-
-      return savedConversationId;
-    } catch (error) {
-      console.warn(
-        "Could not save conversation to MongoDB:",
-        error
-      );
-
-      return conversationId;
-    }
-  };
-
-
-  // Handle Query Submission
   const handleAsk = async (queryText = question) => {
     const q = (queryText || "").trim();
-
     if (!q || loading) return;
 
     const timeStr = getCurrentTime();
 
+    // 1. Append user message locally.
     const userMsg = {
       id: `usr-${Date.now()}`,
       sender: "user",
@@ -367,28 +359,22 @@ function Chat() {
       time: timeStr,
     };
 
-    const messagesAfterUser = [
-      ...messages,
-      userMsg,
-    ];
+    const messagesBeforeQuestion = messages || [];
+    const messagesWithUser = [...messagesBeforeQuestion, userMsg];
 
-    setMessages(messagesAfterUser);
+    setMessages(messagesWithUser);
     setQuestion("");
     setLoading(true);
-    setActiveTab("chat");
 
     try {
+      // Craft query prefix according to chosen mode.
       let promptQuery = q;
-
       if (answerMode === "simple") {
-        promptQuery =
-          `In simple, clear layman terms without legal jargon: ${q}`;
+        promptQuery = `In simple, clear layman terms without legal jargon: ${q}`;
       } else if (answerMode === "legal") {
-        promptQuery =
-          `Rigorous legal constitutional analysis with statutory wording and jurisprudence: ${q}`;
+        promptQuery = `Rigorous legal constitutional analysis with statutory wording and jurisprudence: ${q}`;
       } else {
-        promptQuery =
-          `Detailed constitutional analysis with scope, key provisions, and points: ${q}`;
+        promptQuery = `Detailed constitutional analysis with scope, key provisions, and points: ${q}`;
       }
 
       const response = await axios.post(
@@ -403,16 +389,11 @@ function Chat() {
       const rawAnswer =
         response.data?.answer ||
         "No response received from the constitutional database.";
-
       const detectedArticle =
         extractArticleId(q) ||
         extractArticleId(rawAnswer) ||
         "Indian Constitution";
-
-      const keyPoints = extractKeyPoints(
-        rawAnswer,
-        detectedArticle
-      );
+      const keyPoints = extractKeyPoints(rawAnswer, detectedArticle);
 
       const botMsg = {
         id: `bot-${Date.now()}`,
@@ -420,50 +401,39 @@ function Chat() {
         articleId: detectedArticle,
         mode: answerMode,
         text: rawAnswer,
-        keyPoints: keyPoints,
+        keyPoints,
         source: `Indian Constitution – ${detectedArticle}`,
         time: getCurrentTime(),
       };
 
-      const completeMessages = [
-        ...messagesAfterUser,
-        botMsg,
-      ];
-
+      const completeMessages = [...messagesWithUser, botMsg];
       setMessages(completeMessages);
 
+      // Existing conversation -> update it. New chat -> create a new one.
       await saveConversationToMongo(
         completeMessages,
         activeConversationId
       );
-
     } catch (error) {
       console.warn(
         "Backend error, falling back to local constitutional analysis:",
         error
       );
 
-      const detectedArticle =
-        extractArticleId(q) || "Article 14";
-
+      // Graceful local fallback if the remote endpoint is unavailable.
+      const detectedArticle = extractArticleId(q) || "Article 14";
       const foundArticle =
         CONSTITUTION_ARTICLES.find(
-          (a) =>
-            a.id.toLowerCase() ===
-            detectedArticle.toLowerCase()
+          (a) => a.id.toLowerCase() === detectedArticle.toLowerCase()
         ) || CONSTITUTION_ARTICLES[3];
 
       let fallbackText = "";
-
       if (answerMode === "simple") {
-        fallbackText =
-          `${foundArticle.id} guarantees that everyone is treated fairly and equally under the law. It makes sure the government does not discriminate against any individual within India.`;
+        fallbackText = `${foundArticle.id} guarantees that everyone is treated fairly and equally under the law. It makes sure the government does not discriminate against any individual within India.`;
       } else if (answerMode === "legal") {
-        fallbackText =
-          `Under ${foundArticle.id} of the Constitution of India, titled '${foundArticle.title}', the State is prohibited from denying to any person equality before the law or the equal protection of the laws within the territory of India.`;
+        fallbackText = `Under ${foundArticle.id} of the Constitution of India, titled '${foundArticle.title}', the State is prohibited from denying to any person equality before the law or the equal protection of the laws within the territory of India.`;
       } else {
-        fallbackText =
-          `${foundArticle.id} of the Indian Constitution (${foundArticle.title}) establishes fundamental constitutional guarantees. ${foundArticle.summary}`;
+        fallbackText = `${foundArticle.id} of the Indian Constitution (${foundArticle.title}) establishes fundamental constitutional guarantees. ${foundArticle.summary}`;
       }
 
       const botMsg = {
@@ -477,18 +447,14 @@ function Chat() {
         time: getCurrentTime(),
       };
 
-      const completeMessages = [
-        ...messagesAfterUser,
-        botMsg,
-      ];
-
+      const completeMessages = [...messagesWithUser, botMsg];
       setMessages(completeMessages);
 
+      // Save fallback answers to MongoDB as well.
       await saveConversationToMongo(
         completeMessages,
         activeConversationId
       );
-
     } finally {
       setLoading(false);
     }
@@ -511,7 +477,7 @@ function Chat() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Start a fresh chat
+  // Clear or start a fresh chat without deleting saved MongoDB history.
   const handleNewChat = () => {
     setMessages([]);
     setQuestion("");
@@ -519,51 +485,43 @@ function Chat() {
     setActiveTab("chat");
   };
 
-
-  // Open an existing MongoDB conversation
+  // Open an existing MongoDB conversation.
   const handleOpenConversation = (conversation) => {
+    if (!conversation) return;
+
     setActiveConversationId(conversation._id);
     setMessages(conversation.messages || []);
     setQuestion("");
     setActiveTab("chat");
   };
 
-
-  // Delete conversation from MongoDB
-  const handleDeleteHistory = async (
-    e,
-    conversationId
-  ) => {
+  // Delete a conversation belonging to the current user.
+  const handleDeleteHistory = async (e, conversationId) => {
     e.stopPropagation();
 
     try {
       await axios.delete(
-        `${CONVERSATIONS_API_URL}/${encodeURIComponent(
-          conversationId
-        )}`,
-        { timeout: 15000 }
+        `${CONVERSATIONS_API_URL}/${encodeURIComponent(conversationId)}`,
+        {
+          params: { email: userEmail },
+          timeout: 15000,
+        }
       );
 
       setConversations((prev) =>
-        prev.filter(
-          (conversation) =>
-            conversation._id !== conversationId
-        )
+        prev.filter((conversation) => conversation._id !== conversationId)
       );
 
-      if (
-        activeConversationId ===
-        conversationId
-      ) {
+      setRecentQuestions((prev) =>
+        prev.filter((item) => item.id !== conversationId)
+      );
+
+      if (activeConversationId === conversationId) {
         setActiveConversationId(null);
         setMessages([]);
       }
-
     } catch (error) {
-      console.warn(
-        "Could not delete conversation:",
-        error
-      );
+      console.warn("Could not delete conversation:", error);
     }
   };
 
@@ -639,13 +597,10 @@ function Chat() {
           </div>
 
           {/* Navigation Menu */}
-          {/* Navigation Menu */}
           <nav className="sidebar-menu">
             <button
               className={`menu-item ${activeTab === "chat" ? "active" : ""}`}
-              onClick={() => {
-                setActiveTab("chat");
-              }}
+              onClick={() => setActiveTab("chat")}
             >
               <ChatIcon size={19} />
               <span>Chat</span>
@@ -732,14 +687,14 @@ function Chat() {
             <span>Logout</span>
           </button>
         </div>
-      </aside >
+      </aside>
 
       {/* ============================================================
           CENTER CHAT VIEWPORT
           ============================================================ */}
-      < main className="chat-main-viewport" >
+      <main className="chat-main-viewport">
         {/* Top Header Banner */}
-        < header className="main-header-banner" >
+        <header className="main-header-banner">
           <div className="header-titles">
             <h1>Ask. Explore. Understand.</h1>
             <p>Get accurate, article-based answers from the Indian Constitution</p>
@@ -760,10 +715,10 @@ function Chat() {
               {darkMode ? <SunIcon size={18} /> : <MoonIcon size={18} />}
             </button>
           </div>
-        </header >
+        </header>
 
         {/* Mode Selector Strip */}
-        < section className="mode-selector-strip" >
+        <section className="mode-selector-strip">
           <div className="mode-selector-label">
             <span>Answer Mode:</span>
           </div>
@@ -799,167 +754,161 @@ function Chat() {
             {answerMode === "detailed" && "Comprehensive context & structured key points"}
             {answerMode === "legal" && "Statutory constitutional doctrine & jurisprudence"}
           </span>
-        </section >
+        </section>
 
         {/* Chat Feed */}
-        < div className="chat-stream-container" >
-          {
-            messages.length === 0 && (
-              <div style={{ textAlign: "center", margin: "auto", color: "var(--text-muted)" }}>
-                <div style={{ marginBottom: "12px", opacity: 0.7 }}>
-                  <AshokaEmblem size={48} />
-                </div>
-                <h3 style={{ color: "var(--text-dark)", marginBottom: "6px" }}>
-                  Welcome to Constitution AI
-                </h3>
-                <p style={{ fontSize: "14px", maxWidth: "440px", margin: "auto" }}>
-                  Select an answer mode and enter your constitutional query below, or choose one of the suggested questions.
-                </p>
+        <div className="chat-stream-container">
+          {messages.length === 0 && (
+            <div style={{ textAlign: "center", margin: "auto", color: "var(--text-muted)" }}>
+              <div style={{ marginBottom: "12px", opacity: 0.7 }}>
+                <AshokaEmblem size={48} />
               </div>
-            )
-          }
+              <h3 style={{ color: "var(--text-dark)", marginBottom: "6px" }}>
+                Welcome to Constitution AI
+              </h3>
+              <p style={{ fontSize: "14px", maxWidth: "440px", margin: "auto" }}>
+                Select an answer mode and enter your constitutional query below, or choose one of the suggested questions.
+              </p>
+            </div>
+          )}
 
-          {
-            messages.map((msg) => {
-              if (msg.sender === "user") {
-                return (
-                  <div key={msg.id} className="chat-row-user">
-                    <div className="user-bubble">
-                      <div className="user-bubble-text">{msg.text}</div>
-                      <div className="user-meta-footer">
-                        <span className="message-timestamp">{msg.time}</span>
-                        <span className="checkmark-double">✓✓</span>
-                      </div>
-                    </div>
-                    <div className="user-avatar-small">{userInitial}</div>
-                  </div>
-                );
-              }
-
-              // Assistant Card
-              const isBookmarked = bookmarkedArticles.includes(msg.articleId);
-
+          {messages.map((msg) => {
+            if (msg.sender === "user") {
               return (
-                <div key={msg.id} className="chat-row-bot">
-                  <div className="bot-icon-circle">
-                    <ScalesIcon size={18} />
-                  </div>
-
-                  <div className="bot-card-body">
-                    <div className="bot-card-header">
-                      <span className="bot-source-tag">Based on the Constitution of India</span>
-                      <span className="bot-mode-tag">
-                        {msg.mode ? `${msg.mode.charAt(0).toUpperCase() + msg.mode.slice(1)} Mode` : "Detailed Mode"}
-                      </span>
-                    </div>
-
-                    <div className="bot-answer-text">
-                      {msg.text.includes(msg.articleId) ? (
-                        <>
-                          {msg.text.split(new RegExp(`(${msg.articleId})`, "gi")).map((part, i) =>
-                            part.toLowerCase() === (msg.articleId || "").toLowerCase() ? (
-                              <strong key={i} style={{ color: "var(--primary-blue)" }}>
-                                {part}
-                              </strong>
-                            ) : (
-                              part
-                            )
-                          )}
-                        </>
-                      ) : (
-                        msg.text
-                      )}
-                    </div>
-
-                    {msg.articleId && (
-                      <button
-                        className="article-pill-tag"
-                        onClick={() => handleOpenArticleSource(msg.articleId)}
-                        title={`View full details of ${msg.articleId}`}
-                      >
-                        {msg.articleId}
-                      </button>
-                    )}
-
-                    {msg.keyPoints && msg.keyPoints.length > 0 && (
-                      <div className="key-points-subcard">
-                        <div className="key-points-title">
-                          <LightbulbIcon size={16} />
-                          <span>Key Points</span>
-                        </div>
-                        <ul className="key-points-list">
-                          {msg.keyPoints.map((point, idx) => (
-                            <li key={idx}>{point}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    <div className="bot-card-footer">
-                      <span
-                        className="source-citation-link"
-                        onClick={() => handleOpenArticleSource(msg.articleId)}
-                        title="Open source reference"
-                      >
-                        <DocumentIcon size={13} />
-                        <span>Source: {msg.source || `Indian Constitution – ${msg.articleId}`}</span>
-                        <ExternalLinkIcon size={12} />
-                      </span>
-
-                      <div className="bot-card-actions">
-                        <button
-                          className={`card-action-btn ${isBookmarked ? "bookmarked" : ""}`}
-                          onClick={() => toggleBookmark(msg.articleId)}
-                          title={isBookmarked ? "Remove Bookmark" : "Bookmark this Article"}
-                        >
-                          <BookmarkIcon size={14} filled={isBookmarked} />
-                          <span>{isBookmarked ? "Bookmarked" : "Bookmark"}</span>
-                        </button>
-
-                        <span className="message-timestamp">{msg.time}</span>
-
-                        <button
-                          className="card-action-btn"
-                          onClick={() => handleCopy(msg.id, msg.text)}
-                          title="Copy to clipboard"
-                        >
-                          {copiedId === msg.id ? (
-                            <>
-                              <CheckIcon size={14} />
-                              <span style={{ color: "var(--accent-green)" }}>Copied</span>
-                            </>
-                          ) : (
-                            <CopyIcon size={14} />
-                          )}
-                        </button>
-                      </div>
+                <div key={msg.id} className="chat-row-user">
+                  <div className="user-bubble">
+                    <div className="user-bubble-text">{msg.text}</div>
+                    <div className="user-meta-footer">
+                      <span className="message-timestamp">{msg.time}</span>
+                      <span className="checkmark-double">✓✓</span>
                     </div>
                   </div>
+                  <div className="user-avatar-small">{userInitial}</div>
                 </div>
               );
-            })
-          }
+            }
 
-          {
-            loading && (
-              <div className="chat-row-bot">
+            // Assistant Card
+            const isBookmarked = bookmarkedArticles.includes(msg.articleId);
+
+            return (
+              <div key={msg.id} className="chat-row-bot">
                 <div className="bot-icon-circle">
                   <ScalesIcon size={18} />
                 </div>
-                <div className="bot-typing-indicator">
-                  <div className="typing-dot"></div>
-                  <div className="typing-dot"></div>
-                  <div className="typing-dot"></div>
+
+                <div className="bot-card-body">
+                  <div className="bot-card-header">
+                    <span className="bot-source-tag">Based on the Constitution of India</span>
+                    <span className="bot-mode-tag">
+                      {msg.mode ? `${msg.mode.charAt(0).toUpperCase() + msg.mode.slice(1)} Mode` : "Detailed Mode"}
+                    </span>
+                  </div>
+
+                  <div className="bot-answer-text">
+                    {msg.text.includes(msg.articleId) ? (
+                      <>
+                        {msg.text.split(new RegExp(`(${msg.articleId})`, "gi")).map((part, i) =>
+                          part.toLowerCase() === (msg.articleId || "").toLowerCase() ? (
+                            <strong key={i} style={{ color: "var(--primary-blue)" }}>
+                              {part}
+                            </strong>
+                          ) : (
+                            part
+                          )
+                        )}
+                      </>
+                    ) : (
+                      msg.text
+                    )}
+                  </div>
+
+                  {msg.articleId && (
+                    <button
+                      className="article-pill-tag"
+                      onClick={() => handleOpenArticleSource(msg.articleId)}
+                      title={`View full details of ${msg.articleId}`}
+                    >
+                      {msg.articleId}
+                    </button>
+                  )}
+
+                  {msg.keyPoints && msg.keyPoints.length > 0 && (
+                    <div className="key-points-subcard">
+                      <div className="key-points-title">
+                        <LightbulbIcon size={16} />
+                        <span>Key Points</span>
+                      </div>
+                      <ul className="key-points-list">
+                        {msg.keyPoints.map((point, idx) => (
+                          <li key={idx}>{point}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="bot-card-footer">
+                    <span
+                      className="source-citation-link"
+                      onClick={() => handleOpenArticleSource(msg.articleId)}
+                      title="Open source reference"
+                    >
+                      <DocumentIcon size={13} />
+                      <span>Source: {msg.source || `Indian Constitution – ${msg.articleId}`}</span>
+                      <ExternalLinkIcon size={12} />
+                    </span>
+
+                    <div className="bot-card-actions">
+                      <button
+                        className={`card-action-btn ${isBookmarked ? "bookmarked" : ""}`}
+                        onClick={() => toggleBookmark(msg.articleId)}
+                        title={isBookmarked ? "Remove Bookmark" : "Bookmark this Article"}
+                      >
+                        <BookmarkIcon size={14} filled={isBookmarked} />
+                        <span>{isBookmarked ? "Bookmarked" : "Bookmark"}</span>
+                      </button>
+
+                      <span className="message-timestamp">{msg.time}</span>
+
+                      <button
+                        className="card-action-btn"
+                        onClick={() => handleCopy(msg.id, msg.text)}
+                        title="Copy to clipboard"
+                      >
+                        {copiedId === msg.id ? (
+                          <>
+                            <CheckIcon size={14} />
+                            <span style={{ color: "var(--accent-green)" }}>Copied</span>
+                          </>
+                        ) : (
+                          <CopyIcon size={14} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
-            )
-          }
+            );
+          })}
+
+          {loading && (
+            <div className="chat-row-bot">
+              <div className="bot-icon-circle">
+                <ScalesIcon size={18} />
+              </div>
+              <div className="bot-typing-indicator">
+                <div className="typing-dot"></div>
+                <div className="typing-dot"></div>
+                <div className="typing-dot"></div>
+              </div>
+            </div>
+          )}
 
           <div ref={chatEndRef} />
-        </div >
+        </div>
 
         {/* Suggested Questions */}
-        < section className="suggested-section" >
+        <section className="suggested-section">
           <div className="suggested-header">
             <LightbulbIcon size={14} />
             <span>Suggested Questions</span>
@@ -975,10 +924,10 @@ function Chat() {
               </button>
             ))}
           </div>
-        </section >
+        </section>
 
         {/* Chat Input Bar */}
-        < footer className="chat-input-wrapper" >
+        <footer className="chat-input-wrapper">
           <form
             className="input-pill-container"
             onSubmit={(e) => {
@@ -1013,15 +962,15 @@ function Chat() {
               <SendIcon size={17} />
             </button>
           </form>
-        </footer >
-      </main >
+        </footer>
+      </main>
 
       {/* ============================================================
           RIGHT SIDEBAR
           ============================================================ */}
-      < aside className="right-sidebar" >
+      <aside className="right-sidebar">
         {/* Card 1: Indian Constitution Browser */}
-        < div className="right-card-constitution" >
+        <div className="right-card-constitution">
           <div className="constitution-card-top">
             <div className="constitution-card-text">
               <h3>Indian Constitution</h3>
@@ -1043,10 +992,10 @@ function Chat() {
             <span>Browse Articles</span>
             <ChevronRightIcon size={14} />
           </button>
-        </div >
+        </div>
 
         {/* Card 2: Recent Questions (Conversation History) */}
-        < div className="right-card-history" >
+        <div className="right-card-history">
           <div className="history-card-header">
             <div className="history-header-title">
               <HistoryIcon size={16} />
@@ -1090,279 +1039,280 @@ function Chat() {
             <PlusIcon size={14} />
             <span>New Chat</span>
           </button>
-        </div >
+        </div>
 
         {/* Card 3: Dr. B.R. Ambedkar Quote */}
-        < div className="right-card-quote" >
+        <div className="right-card-quote">
           <div className="quote-watermark-symbol">“</div>
           <p className="quote-card-text">
             The Constitution is not a mere lawyer's document, it is a vehicle of life, and its spirit is always the spirit of age.
           </p>
           <span className="quote-card-author">— Dr. B.R. Ambedkar</span>
-        </div >
-      </aside >
+        </div>
+      </aside>
 
       {/* ============================================================
           OVERLAYS: ARTICLES EXPLORER & BOOKMARKS
           ============================================================ */}
-      {
-        activeTab === "articles" && (
-          <div className="modal-backdrop-view">
-            <div className="modal-header-row">
-              <div className="modal-header-titles">
-                <h2>Constitutional Articles & Bookmarks</h2>
-                <p>Explore articles, study legal provisions, and manage your bookmarked laws</p>
+      {activeTab === "articles" && (
+        <div className="modal-backdrop-view">
+          <div className="modal-header-row">
+            <div className="modal-header-titles">
+              <h2>Constitutional Articles & Bookmarks</h2>
+              <p>Explore articles, study legal provisions, and manage your bookmarked laws</p>
+            </div>
+            <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
+              ← Back to Chat
+            </button>
+          </div>
+
+          {/* Search Bar */}
+          <div className="articles-search-bar">
+            <SearchIcon size={18} color="var(--text-muted)" />
+            <input
+              type="text"
+              className="articles-search-input"
+              placeholder="Search articles by number, title, or keywords (e.g. equality, speech, arrest, emergency)..."
+              value={articleSearch}
+              onChange={(e) => setArticleSearch(e.target.value)}
+            />
+          </div>
+
+          {previewArticle && (
+            <div
+              style={{
+                background: "var(--primary-light)",
+                border: "1px solid var(--primary-border)",
+                borderRadius: "var(--radius-md)",
+                padding: "16px",
+                marginBottom: "16px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <div>
+                <span
+                  style={{
+                    fontSize: "11px",
+                    fontWeight: "700",
+                    color: "var(--primary-blue)",
+                    letterSpacing: "0.5px",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Source Reference Spotlight
+                </span>
+                <h3
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: "700",
+                    margin: "4px 0",
+                    color: "var(--text-dark)",
+                  }}
+                >
+                  {previewArticle.id}: {previewArticle.title}
+                </h3>
+                <p
+                  style={{
+                    fontSize: "13px",
+                    color: "var(--text-main)",
+                    margin: 0,
+                    maxWidth: "700px",
+                  }}
+                >
+                  {previewArticle.summary}
+                </p>
               </div>
-              <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
-                ← Back to Chat
+              <button
+                className="modal-close-btn"
+                style={{ padding: "6px 14px", fontSize: "12px", marginLeft: "16px" }}
+                onClick={() => setPreviewArticle(null)}
+              >
+                Clear Spotlight
               </button>
             </div>
+          )}
 
-            {/* Search Bar */}
-            <div className="articles-search-bar">
-              <SearchIcon size={18} color="var(--text-muted)" />
-              <input
-                type="text"
-                className="articles-search-input"
-                placeholder="Search articles by number, title, or keywords (e.g. equality, speech, arrest, emergency)..."
-                value={articleSearch}
-                onChange={(e) => setArticleSearch(e.target.value)}
-              />
-            </div>
-
-            {previewArticle && (
-              <div
-                style={{
-                  background: "var(--primary-light)",
-                  border: "1px solid var(--primary-border)",
-                  borderRadius: "var(--radius-md)",
-                  padding: "16px",
-                  marginBottom: "16px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
+          {/* Filter Chips */}
+          <div className="category-filter-chips">
+            {categories.map((cat) => (
+              <button
+                key={cat}
+                className={`category-chip-btn ${selectedCategory === cat ? "active" : ""}`}
+                onClick={() => setSelectedCategory(cat)}
               >
-                <div>
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      fontWeight: "700",
-                      color: "var(--primary-blue)",
-                      letterSpacing: "0.5px",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Source Reference Spotlight
-                  </span>
-                  <h3
-                    style={{
-                      fontSize: "16px",
-                      fontWeight: "700",
-                      margin: "4px 0",
-                      color: "var(--text-dark)",
-                    }}
-                  >
-                    {previewArticle.id}: {previewArticle.title}
-                  </h3>
-                  <p
-                    style={{
-                      fontSize: "13px",
-                      color: "var(--text-main)",
-                      margin: 0,
-                      maxWidth: "700px",
-                    }}
-                  >
-                    {previewArticle.summary}
-                  </p>
-                </div>
-                <button
-                  className="modal-close-btn"
-                  style={{ padding: "6px 14px", fontSize: "12px", marginLeft: "16px" }}
-                  onClick={() => setPreviewArticle(null)}
-                >
-                  Clear Spotlight
-                </button>
-              </div>
-            )}
+                {cat === "Bookmarked" && (
+                  <BookmarkIcon
+                    size={13}
+                    filled={bookmarkedArticles.length > 0}
+                    style={{ marginRight: 4 }}
+                  />
+                )}
+                {cat} {cat === "Bookmarked" ? `(${bookmarkedArticles.length})` : ""}
+              </button>
+            ))}
+          </div>
 
-            {/* Filter Chips */}
-            <div className="category-filter-chips">
-              {categories.map((cat) => (
-                <button
-                  key={cat}
-                  className={`category-chip-btn ${selectedCategory === cat ? "active" : ""}`}
-                  onClick={() => setSelectedCategory(cat)}
-                >
-                  {cat === "Bookmarked" && (
-                    <BookmarkIcon
-                      size={13}
-                      filled={bookmarkedArticles.length > 0}
-                      style={{ marginRight: 4 }}
-                    />
-                  )}
-                  {cat} {cat === "Bookmarked" ? `(${bookmarkedArticles.length})` : ""}
-                </button>
-              ))}
-            </div>
+          {/* Articles Grid */}
+          <div className="articles-grid-layout">
+            {filteredArticles.map((art) => {
+              const isSaved = bookmarkedArticles.includes(art.id);
 
-            {/* Articles Grid */}
-            <div className="articles-grid-layout">
-              {filteredArticles.map((art) => {
-                const isSaved = bookmarkedArticles.includes(art.id);
-
-                return (
-                  <div key={art.id} className="article-card-item">
-                    <div>
-                      <div className="article-card-top-row">
-                        <span className="article-badge-id">{art.id}</span>
-                        <button
-                          className={`card-action-btn ${isSaved ? "bookmarked" : ""}`}
-                          onClick={() => toggleBookmark(art.id)}
-                          title={isSaved ? "Remove Bookmark" : "Bookmark this Article"}
-                        >
-                          <BookmarkIcon size={16} filled={isSaved} />
-                        </button>
-                      </div>
-
-                      <h4 className="article-card-title">{art.title}</h4>
-                      <div className="article-card-part">{art.part}</div>
-                      <p className="article-card-summary">{art.summary}</p>
-                    </div>
-
-                    <div className="article-card-footer">
+              return (
+                <div key={art.id} className="article-card-item">
+                  <div>
+                    <div className="article-card-top-row">
+                      <span className="article-badge-id">{art.id}</span>
                       <button
-                        className="ask-article-ai-btn"
-                        onClick={() => {
-                          setActiveTab("chat");
-                          handleAsk(`What does ${art.id} of the Constitution state and provide?`);
-                        }}
+                        className={`card-action-btn ${isSaved ? "bookmarked" : ""}`}
+                        onClick={() => toggleBookmark(art.id)}
+                        title={isSaved ? "Remove Bookmark" : "Bookmark this Article"}
                       >
-                        Ask AI about {art.id} →
+                        <BookmarkIcon size={16} filled={isSaved} />
                       </button>
                     </div>
-                  </div>
-                );
-              })}
 
-              {filteredArticles.length === 0 && (
-                <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px", color: "var(--text-muted)" }}>
-                  <p>No articles found matching your criteria.</p>
+                    <h4 className="article-card-title">{art.title}</h4>
+                    <div className="article-card-part">{art.part}</div>
+                    <p className="article-card-summary">{art.summary}</p>
+                  </div>
+
+                  <div className="article-card-footer">
+                    <button
+                      className="ask-article-ai-btn"
+                      onClick={() => {
+                        setActiveTab("chat");
+                        handleAsk(`What does ${art.id} of the Constitution state and provide?`);
+                      }}
+                    >
+                      Ask AI about {art.id} →
+                    </button>
+                  </div>
                 </div>
-              )}
-            </div>
+              );
+            })}
+
+            {filteredArticles.length === 0 && (
+              <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "40px", color: "var(--text-muted)" }}>
+                <p>No articles found matching your criteria.</p>
+              </div>
+            )}
           </div>
-        )
-      }
+        </div>
+      )}
 
       {/* ============================================================
           OVERLAYS: FULL HISTORY VIEW
           ============================================================ */}
-      {
-        activeTab === "history" && (
-          <div className="modal-backdrop-view">
-            <div className="modal-header-row">
-              <div className="modal-header-titles">
-                <h2>Conversation History</h2>
-                <p>Revisit and manage your past constitutional questions</p>
-              </div>
-              <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
-                ← Back to Chat
-              </button>
+      {activeTab === "history" && (
+        <div className="modal-backdrop-view">
+          <div className="modal-header-row">
+            <div className="modal-header-titles">
+              <h2>Conversation History</h2>
+              <p>Revisit and manage your past constitutional questions</p>
             </div>
-
-            <div className="history-modal-list">
-              {recentQuestions.map((item) => (
-                <div
-                  key={item.id}
-                  className="history-modal-item"
-                  onClick={() => {
-                    setActiveTab("chat");
-                    handleAsk(item.query);
-                  }}
-                >
-                  <div className="history-item-info">
-                    <h4>{item.query}</h4>
-                    <span>Asked at {item.time}</span>
-                  </div>
-
-                  <button
-                    className="history-delete-btn"
-                    onClick={(e) => handleDeleteHistory(e, item.id)}
-                    title="Delete from history"
-                  >
-                    <TrashIcon size={16} />
-                  </button>
-                </div>
-              ))}
-
-              {conversations.length === 0 && (
-                <p style={{ color: "var(--text-muted)" }}>
-                  No conversations in history yet.
-                </p>
-              )}
-            </div>
+            <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
+              ← Back to Chat
+            </button>
           </div>
-        )
-      }
+
+          <div className="history-modal-list">
+            {recentQuestions.map((item) => (
+              <div
+                key={item.id}
+                className="history-modal-item"
+                onClick={() => {
+                  const conversation = conversations.find(
+                    (candidate) => candidate._id === item.id
+                  );
+
+                  if (conversation) {
+                    handleOpenConversation(conversation);
+                  }
+                }}
+              >
+                <div className="history-item-info">
+                  <h4>{item.query}</h4>
+                  <span>Asked at {item.time}</span>
+                </div>
+
+                <button
+                  className="history-delete-btn"
+                  onClick={(e) => handleDeleteHistory(e, item.id)}
+                  title="Delete from history"
+                >
+                  <TrashIcon size={16} />
+                </button>
+              </div>
+            ))}
+
+            {historyLoading && (
+              <p style={{ color: "var(--text-muted)" }}>Loading conversation history...</p>
+            )}
+
+            {!historyLoading && recentQuestions.length === 0 && (
+              <p style={{ color: "var(--text-muted)" }}>No questions in history yet.</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ============================================================
           OVERLAYS: PROFILE VIEW
           ============================================================ */}
-      {
-        activeTab === "profile" && (
-          <div className="modal-backdrop-view">
-            <div className="modal-header-row">
-              <div className="modal-header-titles">
-                <h2>User Profile & Research Stats</h2>
-                <p>Your Constitution AI workspace profile</p>
-              </div>
-              <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
-                ← Back to Chat
-              </button>
+      {activeTab === "profile" && (
+        <div className="modal-backdrop-view">
+          <div className="modal-header-row">
+            <div className="modal-header-titles">
+              <h2>User Profile & Research Stats</h2>
+              <p>Your Constitution AI workspace profile</p>
             </div>
-
-            <div className="profile-modal-card">
-              <div className="profile-avatar-large">{userInitial}</div>
-              <h3 style={{ fontSize: "20px", fontWeight: "700", color: "var(--text-dark)" }}>
-                {userName}
-              </h3>
-              <p style={{ color: "var(--text-muted)", fontSize: "14px", marginTop: "4px" }}>
-                {userEmail}
-              </p>
-              <div style={{ marginTop: "12px", display: "inline-block", padding: "4px 10px", background: "var(--primary-light)", color: "var(--primary-blue)", borderRadius: "20px", fontSize: "12px", fontWeight: "600" }}>
-                Law Student / Constitutional Researcher
-              </div>
-
-              <div className="profile-stats-grid">
-                <div className="stat-item">
-                  <div className="stat-num">{recentQuestions.length}</div>
-                  <div className="stat-label">Queries Asked</div>
-                </div>
-                <div className="stat-item">
-                  <div className="stat-num">{bookmarkedArticles.length}</div>
-                  <div className="stat-label">Bookmarks</div>
-                </div>
-                <div className="stat-item">
-                  <div className="stat-num" style={{ textTransform: "capitalize" }}>
-                    {answerMode}
-                  </div>
-                  <div className="stat-label">Active Mode</div>
-                </div>
-              </div>
-
-              <button
-                className="browse-articles-action-btn"
-                style={{ marginTop: "24px", width: "100%", justifyContent: "center" }}
-                onClick={() => setActiveTab("chat")}
-              >
-                Resume Chat
-              </button>
-            </div>
+            <button className="modal-close-btn" onClick={() => setActiveTab("chat")}>
+              ← Back to Chat
+            </button>
           </div>
-        )
-      }
-    </div >
+
+          <div className="profile-modal-card">
+            <div className="profile-avatar-large">{userInitial}</div>
+            <h3 style={{ fontSize: "20px", fontWeight: "700", color: "var(--text-dark)" }}>
+              {userName}
+            </h3>
+            <p style={{ color: "var(--text-muted)", fontSize: "14px", marginTop: "4px" }}>
+              {userEmail}
+            </p>
+            <div style={{ marginTop: "12px", display: "inline-block", padding: "4px 10px", background: "var(--primary-light)", color: "var(--primary-blue)", borderRadius: "20px", fontSize: "12px", fontWeight: "600" }}>
+              Law Student / Constitutional Researcher
+            </div>
+
+            <div className="profile-stats-grid">
+              <div className="stat-item">
+                <div className="stat-num">{recentQuestions.length}</div>
+                <div className="stat-label">Queries Asked</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-num">{bookmarkedArticles.length}</div>
+                <div className="stat-label">Bookmarks</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-num" style={{ textTransform: "capitalize" }}>
+                  {answerMode}
+                </div>
+                <div className="stat-label">Active Mode</div>
+              </div>
+            </div>
+
+            <button
+              className="browse-articles-action-btn"
+              style={{ marginTop: "24px", width: "100%", justifyContent: "center" }}
+              onClick={() => setActiveTab("chat")}
+            >
+              Resume Chat
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
