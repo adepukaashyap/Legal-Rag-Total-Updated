@@ -30,79 +30,8 @@ const API_URL = "https://legal-rag-total-updated-production.up.railway.app/gener
 const CONVERSATIONS_API_URL = "https://legal-rag-total-updated-production.up.railway.app/conversations";
 
 // Initial seed conversation matching the provided mockup image
-const SEED_MESSAGES = [
-  {
-    id: "seed-1",
-    sender: "user",
-    text: "Which Article guarantees equality before the law?",
-    time: "11:24 AM",
-  },
-  {
-    id: "seed-2",
-    sender: "bot",
-    articleId: "Article 14",
-    mode: "detailed",
-    text: "Article 14 of the Indian Constitution guarantees equality before the law and equal protection of the laws to every person within India.",
-    keyPoints: [
-      "Ensures equality before the law",
-      "Provides equal protection of the laws",
-    ],
-    source: "Indian Constitution – Article 14",
-    time: "11:24 AM",
-  },
-  {
-    id: "seed-3",
-    sender: "user",
-    text: "What is Article 21 about?",
-    time: "11:26 AM",
-  },
-  {
-    id: "seed-4",
-    sender: "bot",
-    articleId: "Article 21",
-    mode: "detailed",
-    text: "Article 21 guarantees the protection of life and personal liberty to every person.",
-    keyPoints: [
-      "Protects life and personal liberty",
-      "No person can be deprived of life or personal liberty except according to procedure established by law",
-    ],
-    source: "Indian Constitution – Article 21",
-    time: "11:26 AM",
-  },
-];
 
-const SEED_HISTORY = [
-  {
-    id: "hist-1",
-    title: "Which Article guarantees equality...",
-    time: "11:24 AM",
-    query: "Which Article guarantees equality before the law?",
-  },
-  {
-    id: "hist-2",
-    title: "What is Article 21 about?",
-    time: "11:26 AM",
-    query: "What is Article 21 about?",
-  },
-  {
-    id: "hist-3",
-    title: "What is Article 19?",
-    time: "Yesterday, 4:12 PM",
-    query: "What is Article 19 about?",
-  },
-  {
-    id: "hist-4",
-    title: "Can the government restrict...",
-    time: "Yesterday, 3:45 PM",
-    query: "Can the government restrict freedom of speech?",
-  },
-  {
-    id: "hist-5",
-    title: "What are fundamental rights?",
-    time: "Yesterday, 2:10 PM",
-    query: "What are the fundamental rights in the Indian Constitution?",
-  },
-];
+
 
 function Chat() {
   const navigate = useNavigate();
