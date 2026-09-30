@@ -377,13 +377,6 @@ function Chat() {
     try {
       // Craft query prefix according to chosen mode.
       let promptQuery = q;
-      if (answerMode === "simple") {
-        promptQuery = `In simple, clear layman terms without legal jargon: ${q}`;
-      } else if (answerMode === "legal") {
-        promptQuery = `Rigorous legal constitutional analysis with statutory wording and jurisprudence: ${q}`;
-      } else {
-        promptQuery = `Detailed constitutional analysis with scope, key provisions, and points: ${q}`;
-      }
 
       const response = await axios.post(
         API_URL,

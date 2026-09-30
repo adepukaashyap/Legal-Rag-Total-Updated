@@ -513,6 +513,41 @@ def get_mode_instruction(mode):
         "including the relevant provision, scope, and key "
         "points where supported by the retrieved context."
     )
+    
+def is_constitution_related(query):
+    keywords = [
+        "constitution",
+        "article",
+        "fundamental right",
+        "fundamental rights",
+        "directive principle",
+        "directive principles",
+        "president",
+        "vice president",
+        "parliament",
+        "supreme court",
+        "high court",
+        "court",
+        "government",
+        "citizen",
+        "citizenship",
+        "election",
+        "amendment",
+        "judiciary",
+        "legislature",
+        "executive",
+        "state",
+        "union",
+        "law",
+        "rights",
+        "duties",
+        "preamble",
+        "schedule",
+    ]
+
+    query_lower = query.lower()
+
+    return any(keyword in query_lower for keyword in keywords)
 
 
 def generate_rag_answer(query, mode="detailed"):
@@ -520,6 +555,9 @@ def generate_rag_answer(query, mode="detailed"):
     Main RAG pipeline:
     Query -> MiniLM embedding -> FAISS -> context -> Groq/Qwen.
     """
+    
+    if not is_constitution_related(query):
+        return "I couldn't find this information in the Constitution."
     retrieved = retrieve_context(
         query,
         top_k=5,
@@ -538,10 +576,9 @@ def generate_rag_answer(query, mode="detailed"):
 
     if not retrieved:
         return (
-            "I could not find sufficiently relevant content "
-            "in the indexed Constitution data to answer this "
-            "question."
-        )
+          "I can only answer questions related to the Indian Constitution "
+          "based on the indexed constitutional content."
+         )
 
     context = build_context(retrieved)
 
