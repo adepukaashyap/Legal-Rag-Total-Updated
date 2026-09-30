@@ -57,7 +57,7 @@ function Signup() {
 
     try {
       const res = await axios.post(
-        "http://localhost:5000/signup",
+        "https://legal-rag-total-updated-production.up.railway.app/signup",
         signupData,
         {
           headers: {

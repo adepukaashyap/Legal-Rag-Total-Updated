@@ -17,7 +17,7 @@ function Login() {
 
     try {
       const cleanEmail = email.trim().toLowerCase();
-      const res = await axios.post("http://localhost:5000/login", {
+      const res = await axios.post("https://legal-rag-total-updated-production.up.railway.app/login", {
         email: cleanEmail,
         password,
       });
