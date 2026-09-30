@@ -9,7 +9,7 @@ function Home() {
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
-  const API_URL = "constitution-rag-production.up.railway.app/generate";
+  const API_URL = "http://localhost:5000/generate";
 
   const handleAsk = async () => {
     if (question.trim() === "") return;

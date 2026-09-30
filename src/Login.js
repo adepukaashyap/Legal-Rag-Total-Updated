@@ -1,176 +1,127 @@
-/*import React, { useState } from "react";
-import axios from "axios";
-import { useNavigate, Link } from "react-router-dom";
-
-function Login() {
-  const history = useNavigate();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-
-  async function submit(e) {
-    e.preventDefault();
-    try {
-      const res = await axios.post("http://localhost:8000/login", {
-        email,
-        password,
-      });
-
-      if (res.data === "exist") {
-        history("/home", { state: { id: email } });
-      } else {
-        alert("Invalid credentials");
-      }
-    } catch (e) {
-      alert("Login failed");
-      console.log(e);
-    }
-  }
-
-  return (
-    <div style={{
-      backgroundColor: "#ffffff",
-      color: "#000",
-      fontFamily: "Segoe UI, sans-serif",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      height: "100vh",
-      margin: 0
-    }}>
-      <div className="login-container" style={{
-        width: "100%",
-        maxWidth: "400px",
-        padding: "40px",
-        border: "1px solid #ddd",
-        borderRadius: "12px",
-        boxShadow: "0 0 10px rgba(0,0,0,0.05)"
-      }}>
-        <h2 style={{
-          marginBottom: "24px",
-          textAlign: "center",
-          fontSize: "1.8rem"
-        }}>Login to RAG</h2>
-
-        <form onSubmit={submit}>
-          <input
-            type="email"
-            placeholder="Email Address"
-            required
-            onChange={(e) => setEmail(e.target.value)}
-            style={{
-              width: "100%",
-              padding: "12px",
-              marginBottom: "16px",
-              border: "1px solid #ccc",
-              borderRadius: "8px",
-              fontSize: "1rem"
-            }}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            required
-            onChange={(e) => setPassword(e.target.value)}
-            style={{
-              width: "100%",
-              padding: "12px",
-              marginBottom: "16px",
-              border: "1px solid #ccc",
-              borderRadius: "8px",
-              fontSize: "1rem"
-            }}
-          />
-          <button
-            type="submit"
-            style={{
-              width: "100%",
-              padding: "12px",
-              border: "none",
-              borderRadius: "8px",
-              backgroundColor: "#000",
-              color: "#fff",
-              fontSize: "1rem",
-              cursor: "pointer",
-              transition: "0.3s ease"
-            }}
-          >
-            Login
-          </button>
-        </form>
-
-        <p style={{
-          textAlign: "center",
-          marginTop: "16px",
-          fontSize: "0.9rem"
-        }}>
-          Don't have an account?{" "}
-          <Link to="/signup" style={{ color: "#000", textDecoration: "underline" }}>
-            Sign Up
-          </Link>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-export default Login;*/
 import React, { useState } from "react";
 import axios from "axios";
 import { useNavigate, Link } from "react-router-dom";
-import "./Login.css"; // Make sure this file exists and includes the CSS below
+import "./Login.css";
 
 function Login() {
-  const history = useNavigate();
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   async function submit(e) {
     e.preventDefault();
+    setError("");
+    setLoading(true);
+
     try {
-      const res = await axios.post("https://constitution-rag-production.up.railway.app/login", {
-        email,
+      const cleanEmail = email.trim().toLowerCase();
+      const res = await axios.post("http://localhost:5000/login", {
+        email: cleanEmail,
         password,
       });
 
       if (res.status === 200 && res.data.message === "Login successful") {
-          history("/home", { state: { id: email } });
+        const userObj = {
+          id: cleanEmail,
+          email: res.data.email || cleanEmail,
+          name: res.data.name || cleanEmail,
+        };
+
+        try {
+          localStorage.setItem("user", JSON.stringify(userObj));
+        } catch (storageErr) {
+          console.error("Failed to save user in localStorage:", storageErr);
+        }
+
+        navigate("/home", { state: userObj });
       } else {
-          alert("Invalid credentials");
-       }
+        setError(res.data?.error || "Invalid credentials");
+      }
     } catch (e) {
-      alert("Login failed");
-      console.log(e);
+      console.log("Login error:", e);
+      setError(e.response?.data?.error || "Login failed. Please check your credentials.");
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <div className="container" onClick={() => {}}>
+    <div className="container">
       <div className="top"></div>
       <div className="bottom"></div>
       <div className="center">
         <h2>Please Sign In</h2>
-        <form onSubmit={submit}>
+
+        {error && (
+          <div
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              marginBottom: "12px",
+              backgroundColor: "#fee2e2",
+              color: "#b91c1c",
+              border: "1px solid #f87171",
+              borderRadius: "6px",
+              fontSize: "0.88rem",
+              textAlign: "center",
+              lineHeight: 1.4,
+            }}
+          >
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={submit} style={{ width: "100%" }}>
           <input
             type="email"
             placeholder="Email"
             required
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            disabled={loading}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (error) setError("");
+            }}
           />
           <input
             type="password"
             placeholder="Password"
             required
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            disabled={loading}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              if (error) setError("");
+            }}
           />
-          <button type="submit" style={{ marginTop: "10px", padding: "10px", width: "100%" }}>
-            Login
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              marginTop: "12px",
+              padding: "12px",
+              width: "100%",
+              backgroundColor: loading ? "#93c5fd" : "#4a6cf7",
+              border: "none",
+              borderRadius: "6px",
+              color: "#fff",
+              fontSize: "1rem",
+              fontWeight: "600",
+              cursor: loading ? "not-allowed" : "pointer",
+              transition: "background-color 0.2s ease",
+            }}
+          >
+            {loading ? "Signing in..." : "Login"}
           </button>
         </form>
-        <p style={{ marginTop: "10px" }}>
+        <p style={{ marginTop: "14px", fontSize: "0.92rem" }}>
           Don't have an account?{" "}
-          <Link to="/signup" style={{ color: "#000", textDecoration: "underline" }}>
+          <Link
+            to="/signup"
+            style={{ color: "#4a6cf7", textDecoration: "underline", fontWeight: "600" }}
+          >
             Sign Up
           </Link>
         </p>

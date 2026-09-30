@@ -26,8 +26,8 @@ import {
   TrashIcon,
 } from "./Icons";
 
-const API_URL = "https://constitution-rag-production.up.railway.app/generate";
-const CONVERSATIONS_API_URL = "https://constitution-rag-production.up.railway.app/conversations";
+const API_URL = "http://localhost:5000/generate";
+const CONVERSATIONS_API_URL = "http://localhost:5000/conversations";
 
 // Initial seed conversation matching the provided mockup image
 const SEED_MESSAGES = [
@@ -109,15 +109,23 @@ function Chat() {
   const location = useLocation();
 
   // User identification from auth / location state / localStorage
-  const userParam = location.state?.name || location.state?.id;
+  const savedUser = (() => {
+    try {
+      return JSON.parse(localStorage.getItem("user") || "null");
+    } catch {
+      return null;
+    }
+  })();
+
+  const userParam = location.state?.name || location.state?.id || savedUser?.name || savedUser?.id;
   const userName = userParam
     ? userParam.includes("@")
       ? userParam.split("@")[0].replace(/[._]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
       : userParam
-    : "Kaashyap Adepu";
+    : (savedUser?.name || "Law Student");
 
-  const userEmail = location.state?.email || (userParam && userParam.includes("@") ? userParam : "kaashyap@example.com");
-  const userInitial = userName.trim().charAt(0).toUpperCase() || "K";
+  const userEmail = location.state?.email || savedUser?.email || (userParam && userParam.includes("@") ? userParam : "user@example.com");
+  const userInitial = userName.trim().charAt(0).toUpperCase() || "U";
 
   // App State
   const [activeTab, setActiveTab] = useState("chat"); // 'chat' | 'articles' | 'history' | 'bookmarks' | 'profile'
@@ -411,8 +419,8 @@ function Chat() {
 
       // Existing conversation -> update it. New chat -> create a new one.
       await saveConversationToMongo(
-        completeMessages,
-        activeConversationId
+        [userMsg, botMsg],
+        null
       );
     } catch (error) {
       console.warn(
@@ -452,8 +460,8 @@ function Chat() {
 
       // Save fallback answers to MongoDB as well.
       await saveConversationToMongo(
-        completeMessages,
-        activeConversationId
+        [userMsg, botMsg],
+        null
       );
     } finally {
       setLoading(false);
@@ -682,7 +690,15 @@ function Chat() {
             <ChevronRightIcon size={14} className="user-chevron" />
           </div>
 
-          <button className="logout-action-btn" onClick={() => navigate("/")}>
+          <button
+            className="logout-action-btn"
+            onClick={() => {
+              try {
+                localStorage.removeItem("user");
+              } catch (e) {}
+              navigate("/");
+            }}
+          >
             <LogoutIcon size={16} />
             <span>Logout</span>
           </button>
